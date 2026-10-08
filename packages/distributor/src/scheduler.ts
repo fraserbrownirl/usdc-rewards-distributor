@@ -1,67 +1,49 @@
 #!/usr/bin/env node
-import { execFileSync } from 'child_process';
+import { execFile } from 'child_process';
 import { join } from 'path';
-import { loadConfig } from './config';
-import { Db } from './db';
-import { Alerter, utcNow } from './alerts';
-import { listInboxFiles } from './ingest';
+import { loadJobConfig } from './config';
+import { Alerter } from './alerts';
 
 /**
- * Scheduler — spec §5/§13. Runs `distributor run` every 15 minutes (the run
- * itself is advisory-locked, so overlapping invocations are safe no-ops) and
- * fires deadline alerts: today's file missing after 02:00 UTC, an ingested
- * round still unpublished after 06:00 UTC. Alerts fire at most once per day
- * per code (tracked in-process; a restart may re-fire once, which is fine).
+ * Scheduler — spec §5/§13. Spawns `distributor run` every 15 minutes (the run
+ * itself is advisory-locked, so overlapping invocations are safe no-ops).
+ * Deadline alerts (file_missing / publish_overdue) fire inside the run —
+ * step 12 — deduped once per UTC day via the inbox state file.
  */
 
 const INTERVAL_MS = 15 * 60 * 1000;
-const FILE_DEADLINE_HOUR = 2;
-const PUBLISH_DEADLINE_HOUR = 6;
 
-async function tick(cfg: ReturnType<typeof loadConfig>, alerter: Alerter, fired: Set<string>): Promise<void> {
-    const cliPath = join(__dirname, 'cli.js');
-    try {
-        execFileSync(process.execPath, [cliPath, 'run'], { stdio: 'inherit', env: process.env });
-    } catch (e) {
-        await alerter.critical('publish_failed', 'distributor run exited non-zero', {
-            error: (e as Error).message,
-        });
-    }
+function spawnRun(): Promise<number> {
+    return new Promise((resolvePromise) => {
+        execFile(
+            process.execPath,
+            [join(__dirname, 'cli.js'), 'run'],
+            { env: process.env },
+            (error, stdout, stderr) => {
+                if (stdout) process.stdout.write(stdout);
+                if (stderr) process.stderr.write(stderr);
+                resolvePromise(error ? (typeof error.code === 'number' ? error.code : 1) : 0);
+            }
+        );
+    });
+}
 
-    const { date, hour } = utcNow();
-    const db = new Db(cfg.databaseUrl);
-    try {
-        if (hour >= FILE_DEADLINE_HOUR && !fired.has(`file_missing:${date}`)) {
-            const files = listInboxFiles(cfg.inboxDir);
-            const last = await db.lastIngestedRound();
-            const todayCovered = files.includes(`${date}.json`) || last?.round === date;
-            if (!todayCovered) {
-                fired.add(`file_missing:${date}`);
-                await alerter.warning('file_missing', `no round file for ${date} after 0${FILE_DEADLINE_HOUR}:00 UTC`, { date });
-            }
-        }
-        if (hour >= PUBLISH_DEADLINE_HOUR && !fired.has(`publish_overdue:${date}`)) {
-            const pending = await db.pendingIngestedRound();
-            if (pending) {
-                fired.add(`publish_overdue:${date}`);
-                await alerter.warning('publish_overdue', `round ${pending.round} ingested but not published after 0${PUBLISH_DEADLINE_HOUR}:00 UTC`, {
-                    round: pending.round,
-                });
-            }
-        }
-    } finally {
-        await db.close();
+async function tick(alerter: Alerter): Promise<void> {
+    const code = await spawnRun();
+    if (code !== 0) {
+        // The run's own critical alerts already fired; this marks that the
+        // job is stopped until a person intervenes.
+        await alerter.critical('publish_failed', `distributor run exited with code ${code}`, { exitCode: code });
     }
 }
 
 async function main(): Promise<void> {
-    const cfg = loadConfig();
+    const cfg = loadJobConfig();
     const alerter = new Alerter(cfg.alertWebhookUrl);
-    const fired = new Set<string>();
     console.log(`scheduler: run every ${INTERVAL_MS / 60000} min, inbox=${cfg.inboxDir}`);
-    await tick(cfg, alerter, fired);
+    await tick(alerter);
     setInterval(() => {
-        tick(cfg, alerter, fired).catch((e) => console.error(`tick failed: ${(e as Error).message}`));
+        tick(alerter).catch((e) => console.error(`tick failed: ${(e as Error).message}`));
     }, INTERVAL_MS);
 }
 

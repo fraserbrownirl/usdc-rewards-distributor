@@ -4,33 +4,49 @@ import {
     Keypair,
     PublicKey,
     Transaction,
+    TransactionInstruction,
 } from '@solana/web3.js';
 import {
     createTransferCheckedInstruction,
     getAssociatedTokenAddressSync,
 } from '@solana/spl-token';
-import { Program, AnchorProvider, Wallet } from '@coral-xyz/anchor';
-import { readFileSync } from 'fs';
-import { join } from 'path';
-import { Db } from './db';
-import { Config } from './config';
-import { Alerter } from './alerts';
-import { buildTree, proofToBytes, toHex } from '@podminer/merkle';
 import { PoolClient } from 'pg';
+import bs58 from 'bs58';
+import { Db } from './db';
+import { JobConfig } from './config';
+import { Alerter } from './alerts';
 
 /**
- * Publish — spec §9. For the pending `ingested` round: build the cumulative
- * Merkle tree from the totals table, then submit ONE atomic transaction:
- *   [ComputeBudget limit, ComputeBudget price, TransferChecked(round total),
+ * On-chain access + the publish transaction (spec §8 step 9).
+ *
+ * ONE atomic transaction, signed by the operator:
+ *   [ComputeBudget limit 100_000, ComputeBudget price PRIORITY_FEE_MICROLAMPORTS,
+ *    TransferChecked(round total, 6 decimals, operator ATA -> vault),
  *    update_root(new_root)]
- * Confirm to finalized; on timeout, re-read the on-chain root before
- * concluding anything. Then mark the round published and prune old trees.
+ * The signature and lastValidBlockHeight are stored on the round BEFORE
+ * sending. Confirm to finalized; if the block height passes
+ * lastValidBlockHeight unconfirmed, the caller returns to its
+ * "already landed?" check before signing again.
  */
 
 export const CONFIG_SEED = 'DistributorConfig';
+export const CLAIMED_SEED = 'ClaimedRewards';
+export const ZERO_ROOT_HEX = '0'.repeat(64);
+
+// Anchor account discriminator of ClaimedRewards (sha256("account:ClaimedRewards")[..8]).
+export const CLAIMED_DISCRIMINATOR = Buffer.from([105, 246, 152, 121, 249, 99, 139, 216]);
+// Anchor sighash "global:update_root".
+const UPDATE_ROOT_DISCRIMINATOR = Buffer.from([58, 195, 57, 246, 116, 198, 170, 138]);
 
 export function configPda(programId: PublicKey): PublicKey {
     return PublicKey.findProgramAddressSync([Buffer.from(CONFIG_SEED)], programId)[0];
+}
+
+export function claimedPda(programId: PublicKey, wallet: PublicKey): PublicKey {
+    return PublicKey.findProgramAddressSync(
+        [Buffer.from(CLAIMED_SEED), wallet.toBuffer()],
+        programId
+    )[0];
 }
 
 export interface OnChainConfig {
@@ -42,128 +58,102 @@ export interface OnChainConfig {
     shutdown: boolean;
 }
 
-export async function fetchOnChainRoot(
-    connection: Connection,
-    programId: PublicKey
-): Promise<OnChainConfig> {
+export function parseConfigAccount(data: Buffer): OnChainConfig {
     // Layout (state/distributor_config.rs): 8-byte discriminator, bump u8,
     // root [u8;32], mint, token_vault, admin, updater, shutdown bool.
-    const acc = await connection.getAccountInfo(configPda(programId));
-    if (!acc) throw new Error('on-chain config account not found — program not initialized?');
-    const d = acc.data;
     return {
-        root: d.subarray(9, 41),
-        mint: new PublicKey(d.subarray(41, 73)),
-        vault: new PublicKey(d.subarray(73, 105)),
-        admin: new PublicKey(d.subarray(105, 137)),
-        updater: new PublicKey(d.subarray(137, 169)),
-        shutdown: d[169] !== 0,
+        root: data.subarray(9, 41),
+        mint: new PublicKey(data.subarray(41, 73)),
+        vault: new PublicKey(data.subarray(73, 105)),
+        admin: new PublicKey(data.subarray(105, 137)),
+        updater: new PublicKey(data.subarray(137, 169)),
+        shutdown: data[169] !== 0,
     };
 }
 
-export interface PublishResult {
-    action: 'published' | 'already_current' | 'none';
-    round?: string;
-    root?: string;
-    signature?: string;
-    detail?: string;
+export async function fetchOnChainConfig(
+    connection: Connection,
+    programId: PublicKey
+): Promise<OnChainConfig> {
+    const acc = await connection.getAccountInfo(configPda(programId));
+    if (!acc) throw new Error('on-chain config account not found — program not initialized?');
+    return parseConfigAccount(acc.data);
 }
 
-export async function publishPendingRound(
+/** The vault: the config PDA's associated token account for the mint. */
+export function deriveVault(mint: PublicKey, programId: PublicKey): PublicKey {
+    return getAssociatedTokenAddressSync(mint, configPda(programId), true);
+}
+
+/**
+ * A wallet's cumulative claimed amount, or 0n if no record. On-chain layout
+ * (programs/.../state/claimed_rewards.rs, 32 bytes):
+ *   8-byte discriminator | bump u8 @8 | claimed u64 LE @9 | padding to 32.
+ */
+export function parseClaimedAmount(data: Buffer | null): bigint {
+    if (!data || data.length < 17) return 0n;
+    return data.readBigUInt64LE(9);
+}
+
+export async function fetchClaimed(
+    connection: Connection,
+    programId: PublicKey,
+    wallet: PublicKey
+): Promise<bigint> {
+    const acc = await connection.getAccountInfo(claimedPda(programId, wallet), 'confirmed');
+    return parseClaimedAmount(acc?.data ?? null);
+}
+
+export interface PublishOutcome {
+    /** confirmed: tx finalized (or had already landed). retry: blockhash
+     *  expired — caller re-checks the on-chain root before signing again. */
+    outcome: 'confirmed' | 'retry';
+    signature: string;
+    lastValidBlockHeight: number;
+    slot: number;
+}
+
+/**
+ * Send the atomic publish transaction for a round. Throws (after a critical
+ * alert) when the transaction fails and did NOT land; returns 'retry' when
+ * confirmation timed out without the tx landing.
+ */
+export async function publishRound(
     db: Db,
-    cfg: Config,
+    cfg: JobConfig,
     operator: Keypair,
     alerter: Alerter,
-    client: PoolClient
-): Promise<PublishResult> {
-    const pending = await db.pendingIngestedRound(client);
-    if (!pending) return { action: 'none' };
-
+    client: PoolClient,
+    round: string,
+    roundTotal: bigint,
+    newRoot: Uint8Array,
+    newRootHex: string
+): Promise<PublishOutcome> {
     const connection = new Connection(cfg.rpcUrl, 'confirmed');
     const programId = new PublicKey(cfg.programId);
     const mint = new PublicKey(cfg.usdcMint);
-
-    // Root sanity: on-chain root must match the root of the newest tree that
-    // is NOT the pending round's (i.e. the last published state), or the
-    // zero-ish initial root on first publish.
-    const onchain = await fetchOnChainRoot(connection, programId);
-    if (onchain.shutdown) {
-        await alerter.critical('publish_failed', 'on-chain config is shut down', { round: pending.round });
-        throw new Error('program is shut down');
-    }
-    if (!onchain.updater.equals(operator.publicKey)) {
-        await alerter.critical('publish_failed', 'operator is not the on-chain updater', {
-            round: pending.round,
-            updater: onchain.updater.toBase58(),
-        });
-        throw new Error(`operator ${operator.publicKey.toBase58()} != on-chain updater ${onchain.updater.toBase58()}`);
-    }
-
-    // Build the cumulative tree from totals (all rounds through the pending one).
-    const totals = await db.allTotals(client);
-    const entries = [...totals.entries()].map(([wallet, total]) => ({
-        wallet: Buffer.from(new PublicKey(wallet).toBytes()),
-        total,
-    }));
-    const tree = buildTree(entries);
-    const newRootHex = toHex(tree.root);
-
-    if (Buffer.from(onchain.root).equals(tree.root)) {
-        // Already published (e.g. previous run's tx landed but the mark failed).
-        await db.markPublished(client, pending.round, pending.publish_signature ?? 'recovered', pending.publish_slot ?? 0, pending.publish_last_valid_block_height ?? 0);
-        return { action: 'already_current', round: pending.round, root: newRootHex };
-    }
-
-    // Funding check: operator ATA must hold >= round total.
     const operatorAta = getAssociatedTokenAddressSync(mint, operator.publicKey);
-    const bal = await connection.getTokenAccountBalance(operatorAta).catch(() => null);
-    if (!bal || BigInt(bal.value.amount) < BigInt(pending.total)) {
-        await alerter.critical('publish_failed', 'operator USDC balance below round total', {
-            round: pending.round,
-            need: pending.total,
-            have: bal?.value.amount ?? '0',
-        });
-        throw new Error(`insufficient operator USDC: have ${bal?.value.amount ?? 0}, need ${pending.total}`);
-    }
-    const sol = await connection.getBalance(operator.publicKey);
-    if (sol < cfg.minOperatorSolLamports) {
-        await alerter.warning('low_operator_sol', 'operator SOL below threshold', { lamports: sol });
-    }
 
-    // Persist the tree + proofs BEFORE publishing (spec §10: proofs must be
-    // servable the moment the root is on-chain; if the tx then fails, the
-    // tree row is simply superseded on retry by the same root).
-    const proofs = new Map<string, Buffer>();
-    for (const [wallet] of totals) {
-        const key = Buffer.from(new PublicKey(wallet).toBytes()).toString('hex');
-        const p = tree.proofs.get(key);
-        if (!p) throw new Error(`no proof built for wallet ${wallet}`);
-        proofs.set(wallet, Buffer.from(proofToBytes(p)));
-    }
-    await db.storeTree(client, newRootHex, pending.round, proofs);
-
-    // Build the atomic transaction. IDL bundled from the anchor build
-    // (target/idl), so no on-chain IDL account is needed.
-    const idlPath = process.env.REWARDS_DISTRIBUTOR_IDL_PATH
-        ?? join(__dirname, '..', '..', '..', 'target', 'idl', 'rewards_distributor.json');
-    const idl = JSON.parse(readFileSync(idlPath, 'utf8'));
-    const provider = new AnchorProvider(connection, new Wallet(operator), { commitment: 'confirmed' });
-    const program = new Program(idl, provider);
-
-    const updateRootIx = await (program.methods as any)
-        .updateRoot(Array.from(tree.root))
-        .accounts({
-            config: configPda(programId),
-            updater: operator.publicKey,
-        })
-        .instruction();
+    // update_root(new_root) — discriminator + 32-byte root, accounts resolved
+    // the way RewardsDistributorWrapper.updateRoot does (config PDA + updater).
+    const data = Buffer.alloc(8 + 32);
+    UPDATE_ROOT_DISCRIMINATOR.copy(data, 0);
+    Buffer.from(newRoot).copy(data, 8);
+    const updateRootIx = new TransactionInstruction({
+        programId,
+        keys: [
+            { pubkey: configPda(programId), isSigner: false, isWritable: true },
+            { pubkey: operator.publicKey, isSigner: true, isWritable: false },
+        ],
+        data,
+    });
 
     const transferIx = createTransferCheckedInstruction(
         operatorAta,
         mint,
-        onchain.vault,
+        deriveVault(mint, programId),
         operator.publicKey,
-        BigInt(pending.total),
+        roundTotal,
         6 // USDC decimals
     );
 
@@ -178,28 +168,37 @@ export async function publishPendingRound(
     const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash('finalized');
     tx.recentBlockhash = blockhash;
     tx.sign(operator);
+    // web3.js ≥1.87 populates tx.signature with the raw 64 bytes; every RPC
+    // call below wants the base58 encoding.
+    const signature = bs58.encode(tx.signature!);
 
-    let signature: string;
+    // Spec §8 step 9: store the signature + lastValidBlockHeight BEFORE sending.
+    await db.recordPublishAttempt(client, round, signature, lastValidBlockHeight);
+
     try {
-        signature = await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
+        await connection.sendRawTransaction(tx.serialize(), { skipPreflight: false });
         await connection.confirmTransaction({ signature, blockhash, lastValidBlockHeight }, 'finalized');
     } catch (e) {
-        // Timeout or send failure: the tx may still have landed. Re-check the
-        // on-chain root before declaring failure (spec §9).
-        const after = await fetchOnChainRoot(connection, programId).catch(() => null);
-        if (after && Buffer.from(after.root).equals(tree.root)) {
-            const sigs = await connection.getSignaturesForAddress(configPda(programId), { limit: 1 });
-            signature = sigs[0]?.signature ?? 'unknown';
-        } else {
-            await alerter.critical('publish_failed', 'publish transaction failed', {
-                round: pending.round,
-                error: (e as Error).message,
-            });
-            throw e;
+        // Timeout or send failure: the tx may still have landed. Re-read the
+        // on-chain root before concluding anything (spec §8).
+        const after = await fetchOnChainConfig(connection, programId).catch(() => null);
+        if (after && Buffer.from(after.root).equals(Buffer.from(newRoot))) {
+            const sig = await connection.getSignatureStatus(signature).catch(() => null);
+            return { outcome: 'confirmed', signature, lastValidBlockHeight, slot: sig?.value?.slot ?? 0 };
         }
+        const height = await connection.getBlockHeight().catch(() => 0);
+        if (height > lastValidBlockHeight) {
+            // Expired unconfirmed: safe to go back to "already landed?".
+            return { outcome: 'retry', signature, lastValidBlockHeight, slot: 0 };
+        }
+        await alerter.error('publish_failed', `publish transaction failed for round ${round}`, {
+            round,
+            error: (e as Error).message,
+            signature,
+        });
+        throw e;
     }
 
-    await db.markPublished(client, pending.round, signature, 0, lastValidBlockHeight);
-    await db.pruneTrees(client, newRootHex);
-    return { action: 'published', round: pending.round, root: newRootHex, signature };
+    const sig = await connection.getSignatureStatus(signature).catch(() => null);
+    return { outcome: 'confirmed', signature, lastValidBlockHeight, slot: sig?.value?.slot ?? 0 };
 }

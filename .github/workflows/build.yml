@@ -1,0 +1,58 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  # DECISIONS.md (2026-10-08): anchor's IDL build compiles host crates under
+  # `cargo +nightly test` with RUSTFLAGS=--cfg procmacro2_semver_exempt. The
+  # default current nightly removed proc_macro::SourceFile /
+  # Span::source_file(), breaking anchor-syn 0.30.1 and proc-macro2 <=1.0.94.
+  # Pin the same-era nightly that predates the removal. anchor-lang-idl
+  # honours RUSTUP_TOOLCHAIN.
+  RUSTUP_TOOLCHAIN: nightly-2025-03-01
+
+jobs:
+  program:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchains
+        run: |
+          rustup toolchain install 1.79.0 --profile minimal --component rustfmt
+          rustup toolchain install nightly-2025-03-01 --profile minimal
+          rustup override set 1.79.0
+
+      - name: Install Solana CLI 1.18.26
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v1.18.26/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: Install Anchor CLI 0.30.1
+        run: |
+          cargo install --git https://github.com/coral-xyz/anchor --tag v0.30.1 anchor-cli --locked
+
+      - name: Build program (.so + IDL)
+        run: anchor build
+
+  typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Enable corepack (yarn 1.22.22)
+        run: corepack enable && corepack prepare yarn@1.22.22 --activate
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Unit tests
+        run: yarn workspaces run test

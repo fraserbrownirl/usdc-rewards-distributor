@@ -47,29 +47,33 @@ describe('validateRoundFile', () => {
         const future = new Date(Date.now() + 86400_000 * 2).toISOString().slice(0, 10);
         expect(() =>
             validateRoundFile(`${future}.json`, file({ round: future }), NO_PREV, NO_TOTALS)
-        ).toThrow(/future/);
+        ).toThrow(/earlier/);
     });
 
     it('enforces monotonic rounds with same-sha exception', () => {
         const raw = file();
         const prev = { round: '2026-10-07', fileSha256: 'deadbeef' };
-        expect(() => validateRoundFile('2026-10-07.json', raw, prev, NO_TOTALS)).toThrow(/not after/);
-        expect(() => validateRoundFile('2026-10-06.json', file({ round: '2026-10-06' }), prev, NO_TOTALS)).toThrow(/not after/);
+        expect(() => validateRoundFile('2026-10-07.json', raw, prev, NO_TOTALS)).toThrow(/not later/);
+        expect(() => validateRoundFile('2026-10-06.json', file({ round: '2026-10-06' }), prev, NO_TOTALS)).toThrow(/not later/);
         // identical re-delivery passes validation (caller no-ops on it)
         const sha = require('crypto').createHash('sha256').update(raw).digest('hex');
         const parsed = validateRoundFile('2026-10-07.json', raw, { round: '2026-10-07', fileSha256: sha }, NO_TOTALS);
         expect(parsed.round).toBe('2026-10-07');
     });
 
-    it('rejects count mismatch, empty round, duplicate wallet', () => {
+    it('rejects count mismatch and duplicate wallet; empty round is VALID', () => {
         expect(() => validateRoundFile('2026-10-07.json', file({ count: 99 }), NO_PREV, NO_TOTALS)).toThrow(/count/);
-        expect(() =>
-            validateRoundFile('2026-10-07.json', file({ count: 0, total: '0' }, []), NO_PREV, NO_TOTALS)
-        ).toThrow(/zero/);
         const w = wallet();
         expect(() =>
             validateRoundFile('2026-10-07.json', file({}, [{ wallet: w, amount: '1' }, { wallet: w, amount: '2' }]), NO_PREV, NO_TOTALS)
         ).toThrow(/duplicate/);
+    });
+
+    it('accepts the empty-day form (spec §6: total "0", count 0, rewards [])', () => {
+        const parsed = validateRoundFile('2026-10-07.json', file({ count: 0, total: '0' }, []), NO_PREV, NO_TOTALS);
+        expect(parsed.total).toBe(0n);
+        expect(parsed.rewards).toHaveLength(0);
+        expect(parsed.isEmpty).toBe(true);
     });
 
     it('rejects bad wallets: non-base58 and off-curve PDA', () => {

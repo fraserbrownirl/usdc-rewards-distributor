@@ -2,19 +2,19 @@ import { readdirSync, readFileSync, renameSync, writeFileSync, mkdirSync, exists
 import { join } from 'path';
 import { PoolClient } from 'pg';
 import { Db } from './db';
-import { FileReject, fileSha256, isValidRoundName, validateRoundFile, RoundFile } from './fileValidation';
+import { FileReject, fileSha256, validateRoundFile, RoundFile } from './fileValidation';
 
 /**
- * Inbox IO — spec §6. One round file per UTC day, `INBOX_DIR/<round>.json`.
- * The job ingests AT MOST ONE file per run: the earliest valid pending round
- * (monotonic rule means later files can only be ingested after it). Rejected
- * files are moved aside with an error note and never block later rounds…
- * except that a rejected EARLIER round does block later ones by the monotonic
- * rule, which is intended: gaps are not allowed.
+ * Inbox IO — spec §6/§8 step 5. One round file per UTC day,
+ * `INBOX_DIR/<round>.json`, delivered atomically (tmp + rename).
+ * The job ingests the earliest pending file; on success the caller loops
+ * back for the next one. Rejected files are moved aside with an error note;
+ * because rounds are monotonic, a rejected earlier round blocks later ones
+ * until a person intervenes — that is intended (no gaps).
  */
 
 export interface IngestResult {
-    action: 'ingested' | 'noop' | 'rejected' | 'none';
+    action: 'ingested' | 'empty' | 'noop' | 'rejected' | 'none';
     round?: string;
     detail?: string;
 }
@@ -32,11 +32,10 @@ export function listInboxFiles(inboxDir: string): string[] {
 }
 
 /**
- * Attempt to ingest the earliest pending file. The caller holds the advisory
- * lock and passes its `client`; standalone use (tests) omits it and the pool
- * is used for reads, a fresh client for the write tx.
+ * Attempt to ingest the earliest pending file using the caller's client
+ * (the job holds the advisory lock and passes its client).
  */
-export async function ingestEarliest(db: Db, inboxDir: string, client?: PoolClient): Promise<IngestResult> {
+export async function ingestEarliest(db: Db, inboxDir: string, client: PoolClient): Promise<IngestResult> {
     const processedDir = join(inboxDir, 'processed');
     const rejectedDir = join(inboxDir, 'rejected');
     ensureDir(processedDir);
@@ -60,7 +59,12 @@ export async function ingestEarliest(db: Db, inboxDir: string, client?: PoolClie
 
     let parsed: RoundFile;
     try {
-        parsed = validateRoundFile(fileName, raw, { round: prev?.round ?? null, fileSha256: prev?.file_sha256 ?? null }, totals);
+        parsed = validateRoundFile(
+            fileName,
+            raw,
+            { round: prev?.round ?? null, fileSha256: prev?.file_sha256 ?? null },
+            totals
+        );
     } catch (e) {
         if (e instanceof FileReject) {
             renameSync(join(inboxDir, fileName), join(rejectedDir, fileName));
@@ -73,16 +77,13 @@ export async function ingestEarliest(db: Db, inboxDir: string, client?: PoolClie
         throw e;
     }
 
-    if (client) {
-        await db.ingestRound(client, parsed.round, parsed.sha256, parsed.total, parsed.rewards);
-    } else {
-        const c = await db.pool.connect();
-        try {
-            await db.ingestRound(c, parsed.round, parsed.sha256, parsed.total, parsed.rewards);
-        } finally {
-            c.release();
-        }
+    if (parsed.isEmpty) {
+        await db.insertEmptyRound(client, parsed.round, parsed.sha256);
+        renameSync(join(inboxDir, fileName), join(processedDir, fileName));
+        return { action: 'empty', round: parsed.round };
     }
+
+    await db.ingestRound(client, parsed.round, parsed.sha256, parsed.total, parsed.rewards);
     renameSync(join(inboxDir, fileName), join(processedDir, fileName));
     return {
         action: 'ingested',

@@ -1,34 +1,64 @@
 import Fastify from 'fastify';
 import { Pool } from 'pg';
-import { loadConfig } from '@podminer/distributor';
+import { Connection, PublicKey } from '@solana/web3.js';
+import {
+    Alerter,
+    claimedPda,
+    configPda,
+    deriveVault,
+    fetchOnChainConfig,
+    loadApiConfig,
+    OnChainConfig,
+    parseClaimedAmount,
+    ZERO_ROOT_HEX,
+} from '@podminer/distributor';
 
 /**
- * Read-only claims API — spec §11. Serves Merkle proofs and round status to
- * claimants' wallets. No writes, no auth (proofs are public data; the
- * security boundary is the on-chain verifier). CORS is restricted to
- * CORS_ORIGINS; per-IP rate limiting at RATE_LIMIT_PER_MIN.
+ * Read-only rewards API — spec §9. Serves proofs for the CURRENT ON-CHAIN
+ * ROOT (not the newest DB tree), with the claimed amount read live from the
+ * wallet's ClaimedRewards record at confirmed. No writes, no auth — proofs
+ * are public data; the on-chain verifier is the security boundary.
  *
- *   GET /healthz
- *   GET /v1/rounds                       — recent rounds, newest first
- *   GET /v1/rounds/:round                — one round's status
- *   GET /v1/claims/:wallet               — wallet's current total + proof
- *   GET /v1/reconcile                    — last reconciliation numbers
+ *   GET /healthz                        — 200 when DB and RPC are reachable
+ *   GET /v1/rewards/:wallet             — total/claimed/claimable/proof
+ *   GET /v1/rewards/:wallet/history     — published rounds, newest first
+ *   GET /v1/status                      — program/config/vault/root numbers
+ *
+ * 503 {"error":"shutdown"} when the on-chain shutdown flag is set;
+ * 503 {"error":"tree_unavailable"} (+ critical alert) when the on-chain root
+ * has no stored tree. CORS restricted to CORS_ORIGINS; per-IP rate limit.
  */
 
-const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
-const ROUND_RE = /^\d{4}-\d{2}-\d{2}$/;
+const ROOT_CACHE_MS = 10_000;
 
-interface RateBucket {
-    count: number;
-    resetAt: number;
+interface RootSnapshot {
+    fetchedAt: number;
+    onchain: OnChainConfig;
+    rootHex: string;
+    /** Tree row for the on-chain root; null when missing (tree_unavailable). */
+    tree: { root: string; round: string; wallet_count: number; total_sum: string } | null;
+}
+
+function isBase58Pubkey(s: string): boolean {
+    try {
+        new PublicKey(s);
+        return true;
+    } catch {
+        return false;
+    }
 }
 
 async function main(): Promise<void> {
-    const cfg = loadConfig();
+    const cfg = loadApiConfig();
     const pool = new Pool({ connectionString: cfg.databaseUrl, max: 4 });
+    const connection = new Connection(cfg.rpcUrl, 'confirmed');
+    const programId = new PublicKey(cfg.programId);
+    const mint = new PublicKey(cfg.usdcMint);
+    const vault = deriveVault(mint, programId);
+    const alerter = new Alerter(cfg.alertWebhookUrl);
     const app = Fastify({ logger: true });
 
-    // CORS: empty list = same-origin only (no CORS headers).
+    // CORS: empty list = no CORS headers (same-origin only).
     app.addHook('onSend', async (req, reply) => {
         const origin = req.headers.origin;
         if (origin && cfg.corsOrigins.includes(origin)) {
@@ -38,86 +68,140 @@ async function main(): Promise<void> {
     });
 
     // Naive per-IP fixed-window limiter; sufficient behind one replica.
-    const buckets = new Map<string, RateBucket>();
+    const buckets = new Map<string, { count: number; resetAt: number }>();
     app.addHook('onRequest', async (req, reply) => {
         const now = Date.now();
-        const key = req.ip;
-        const b = buckets.get(key);
+        const b = buckets.get(req.ip);
         if (!b || now > b.resetAt) {
-            buckets.set(key, { count: 1, resetAt: now + 60_000 });
+            buckets.set(req.ip, { count: 1, resetAt: now + 60_000 });
         } else if (++b.count > cfg.rateLimitPerMin) {
-            reply.code(429).send({ error: 'rate limit exceeded' });
+            reply.code(429).send({ error: 'rate_limit' });
         }
     });
 
-    app.get('/healthz', async () => ({ ok: true }));
+    let cache: RootSnapshot | null = null;
+    async function snapshot(): Promise<RootSnapshot> {
+        if (cache && Date.now() - cache.fetchedAt < ROOT_CACHE_MS) return cache;
+        const onchain = await fetchOnChainConfig(connection, programId);
+        const rootHex = Buffer.from(onchain.root).toString('hex');
+        let tree: RootSnapshot['tree'] = null;
+        if (rootHex !== ZERO_ROOT_HEX) {
+            const { rows } = await pool.query(
+                `SELECT root, round::text AS round, wallet_count, total_sum::text AS total_sum FROM trees WHERE root = $1`,
+                [rootHex]
+            );
+            tree = rows[0] ?? null;
+            if (!tree) {
+                // Alert at most once per root — the job's root_mismatch check
+                // is the steady-state guard; this covers API-visible gaps.
+                await alerter.critical('tree_unavailable', `on-chain root ${rootHex} has no stored tree`, {
+                    root: rootHex,
+                });
+            }
+        }
+        cache = { fetchedAt: Date.now(), onchain, rootHex, tree };
+        return cache;
+    }
 
-    app.get('/v1/rounds', async () => {
-        const { rows } = await pool.query(
-            `SELECT round::text, status, total::text, wallet_count, root,
-                    publish_signature, created_at, updated_at
-             FROM rounds ORDER BY round DESC LIMIT 60`
-        );
-        return { rounds: rows };
+    app.get('/healthz', async (_req, reply) => {
+        try {
+            await pool.query('SELECT 1');
+            await connection.getLatestBlockhash('confirmed');
+            return { ok: true };
+        } catch (e) {
+            return reply.code(503).send({ ok: false, error: (e as Error).message });
+        }
     });
 
-    app.get<{ Params: { round: string } }>('/v1/rounds/:round', async (req, reply) => {
-        if (!ROUND_RE.test(req.params.round)) return reply.code(400).send({ error: 'bad round' });
-        const { rows } = await pool.query(
-            `SELECT round::text, status, total::text, wallet_count, root,
-                    publish_signature, publish_slot, created_at, updated_at
-             FROM rounds WHERE round = $1`,
-            [req.params.round]
-        );
-        if (rows.length === 0) return reply.code(404).send({ error: 'round not found' });
-        return rows[0];
-    });
+    app.get<{ Params: { wallet: string } }>('/v1/rewards/:wallet', async (req, reply) => {
+        if (!isBase58Pubkey(req.params.wallet)) return reply.code(400).send({ error: 'invalid wallet' });
+        const wallet = new PublicKey(req.params.wallet);
+        const snap = await snapshot();
+        if (snap.onchain.shutdown) return reply.code(503).send({ error: 'shutdown' });
+        if (snap.rootHex !== ZERO_ROOT_HEX && !snap.tree) {
+            return reply.code(503).send({ error: 'tree_unavailable' });
+        }
 
-    app.get<{ Params: { wallet: string } }>('/v1/claims/:wallet', async (req, reply) => {
-        if (!BASE58_RE.test(req.params.wallet)) return reply.code(400).send({ error: 'bad wallet' });
-        const { rows: trows } = await pool.query(
-            `SELECT total::text, claim_record::text, updated_round::text FROM totals WHERE wallet = $1`,
-            [req.params.wallet]
-        );
-        if (trows.length === 0) return reply.code(404).send({ error: 'wallet not found' });
+        // Claimed: live from the wallet's claim record at confirmed.
+        const claimedAcc = await connection.getAccountInfo(claimedPda(programId, wallet), 'confirmed');
+        const claimed = claimedAcc ? parseClaimedAmount(claimedAcc.data as Buffer) : 0n;
 
-        // Proof from the newest published round's tree (the on-chain root).
-        const { rows: prows } = await pool.query(
-            `SELECT p.proof, t.root, t.round::text
-             FROM proofs p
-             JOIN trees t ON t.root = p.root
-             JOIN rounds r ON r.root = t.root AND r.status = 'published'
-             WHERE p.wallet = $1
-             ORDER BY t.created_at DESC LIMIT 1`,
-            [req.params.wallet]
-        );
-        const total = trows[0].total as string;
+        let total = 0n;
+        let proofHex: string[] = [];
+        let round: string | null = null;
+        if (snap.tree) {
+            round = snap.tree.round;
+            const { rows } = await pool.query(
+                `SELECT total::text AS total, proof FROM proofs WHERE root = $1 AND wallet = $2`,
+                [snap.rootHex, req.params.wallet]
+            );
+            if (rows.length > 0) {
+                total = BigInt(rows[0].total);
+                const raw = rows[0].proof as Buffer;
+                proofHex = raw.toString('hex').match(/.{64}/g) ?? [];
+            }
+        }
+        const claimable = total > claimed ? total - claimed : 0n;
         return {
             wallet: req.params.wallet,
-            total,
-            claimed: trows[0].claim_record,
-            outstanding: (BigInt(total) - BigInt(trows[0].claim_record)).toString(),
-            updatedRound: trows[0].updated_round,
-            proof: prows.length
-                ? {
-                      root: prows[0].root,
-                      round: prows[0].round,
-                      hashes: Buffer.from(prows[0].proof as Buffer)
-                          .toString('hex')
-                          .match(/.{64}/g) ?? [],
-                  }
-                : null, // tree not published yet — claimant waits
+            root: snap.rootHex === ZERO_ROOT_HEX ? null : snap.rootHex,
+            round,
+            total: total.toString(),
+            claimed: claimed.toString(),
+            claimable: claimable.toString(),
+            proof: proofHex,
+            program_id: cfg.programId,
+            mint: cfg.usdcMint,
         };
     });
 
-    app.get('/v1/reconcile', async () => {
+    app.get<{ Params: { wallet: string }; Querystring: { limit?: string } }>(
+        '/v1/rewards/:wallet/history',
+        async (req, reply) => {
+            if (!isBase58Pubkey(req.params.wallet)) return reply.code(400).send({ error: 'invalid wallet' });
+            const snap = await snapshot();
+            if (snap.onchain.shutdown) return reply.code(503).send({ error: 'shutdown' });
+            let limit = 90;
+            if (req.query.limit !== undefined) {
+                limit = Number(req.query.limit);
+                if (!Number.isInteger(limit) || limit < 1 || limit > 365) {
+                    return reply.code(400).send({ error: 'limit must be an integer 1..365' });
+                }
+            }
+            const { rows } = await pool.query(
+                `SELECT rr.round::text AS round, rr.amount::text AS amount
+                 FROM round_rewards rr
+                 JOIN rounds r ON r.round = rr.round AND r.status = 'published'
+                 WHERE rr.wallet = $1
+                 ORDER BY rr.round DESC
+                 LIMIT $2`,
+                [req.params.wallet, limit]
+            );
+            return { wallet: req.params.wallet, history: rows };
+        }
+    );
+
+    app.get('/v1/status', async (_req, reply) => {
+        const snap = await snapshot();
+        if (snap.onchain.shutdown) return reply.code(503).send({ error: 'shutdown' });
+        const vaultBal = await connection
+            .getTokenAccountBalance(vault, 'confirmed')
+            .then((b) => b.value.amount)
+            .catch(() => null);
         const { rows } = await pool.query(
-            `SELECT COALESCE(SUM(total), 0)::text AS funded FROM rounds WHERE status = 'published'`
+            `SELECT round::text AS round FROM rounds WHERE status = 'published' ORDER BY round DESC LIMIT 1`
         );
-        const { rows: crows } = await pool.query(
-            `SELECT COALESCE(SUM(claim_record), 0)::text AS claimed, COALESCE(SUM(total), 0)::text AS owed FROM totals`
-        );
-        return { funded: rows[0].funded, claimed: crows[0].claimed, owed: crows[0].owed };
+        return {
+            program_id: cfg.programId,
+            config: configPda(programId).toBase58(),
+            vault: vault.toBase58(),
+            mint: cfg.usdcMint,
+            root: snap.rootHex === ZERO_ROOT_HEX ? null : snap.rootHex,
+            round: rows[0]?.round ?? null,
+            wallet_count: snap.tree?.wallet_count ?? 0,
+            vault_balance: vaultBal,
+            shutdown: snap.onchain.shutdown,
+        };
     });
 
     await app.listen({ port: cfg.apiPort, host: '0.0.0.0' });

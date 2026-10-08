@@ -1,9 +1,34 @@
-export { loadConfig, Config, MAINNET_USDC_MINT, DEVNET_USDC_MINT } from './config';
-export { Db, RoundRow } from './db';
-export { Alerter, Alert, Severity } from './alerts';
+export {
+    loadDbUrl,
+    loadJobConfig,
+    loadApiConfig,
+    MAINNET_USDC_MINT,
+    BaseConfig,
+    JobConfig,
+    ApiConfig,
+    Cluster,
+} from './config';
+export { Db, RoundRow, RoundStatus, TreeRow, ProofRow, claimRecordPda, CLAIMED_SEED } from './db';
+export { Alerter, Alert, Severity, utcToday, utcYesterday, pastUtcHour } from './alerts';
 export { ingestEarliest, IngestResult, listInboxFiles } from './ingest';
-export { publishPendingRound, PublishResult, fetchOnChainRoot, configPda } from './publish';
-export { reconcile, ReconcileReport } from './reconcile';
+export {
+    publishRound,
+    PublishOutcome,
+    fetchOnChainConfig,
+    fetchClaimed,
+    parseConfigAccount,
+    parseClaimedAmount,
+    configPda,
+    claimedPda,
+    deriveVault,
+    OnChainConfig,
+    CONFIG_SEED,
+    CLAIMED_DISCRIMINATOR,
+    ZERO_ROOT_HEX,
+} from './publish';
+export { reconcile, ReconcileReport, OverclaimFinding } from './reconcile';
+export { runJob, reconcileCommand, loadOperatorKeypair, CriticalStop } from './run';
+export { deadlineAlerts } from './deadlines';
 export {
     validateRoundFile,
     fileSha256,

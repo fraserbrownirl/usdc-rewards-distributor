@@ -11,6 +11,7 @@
     },
     "dependencies": {
         "@podminer/distributor": "1.0.0",
+        "@solana/web3.js": "^1.98.0",
         "fastify": "^4.28.0",
         "pg": "^8.11.5"
     },

@@ -1,159 +1,93 @@
-# Solana Rewards Distributor
+# POD Miner USDC Rewards Distributor
 
-## Program Overview
+Daily USDC rebates for [POD Miner](https://www.pod-miner.com/app) API users,
+paid out on Solana by a pull-based Merkle-distributor program. Each day the
+operator publishes one new Merkle root covering every wallet's **cumulative
+lifetime total**; users claim the difference between their total and what they
+have already claimed, whenever they like, paying their own claim costs.
 
-**The Rewards Distributor** program is designed to efficiently manage and distribute airdrops on Solana using a
-[Merkle tree](https://en.wikipedia.org/wiki/Merkle_tree) structure.
-Each leaf in the tree represents a pair of  `(user-public-key, airdrop-amount)`.
+This repository is a fork of
+[eq-lab/solana-rewards-distributor](https://github.com/eq-lab/solana-rewards-distributor)
+at commit `58505855a86dc77d215f96027a5c6e66699a1cc8`, extended with the
+off-chain pipeline (daily job, ledger, API, claim SDK) that operates the
+program in production.
 
-By utilizing the Merkle tree root, this approach avoids the high costs of uploading thousands of individual entries to
-the blockchain,
-even with Solana's low transaction fees.
-The program also supports authorized updates to the Merkle root while keeping track of already claimed rewards.
-This allows reward amounts to be adjusted over time and calculated off-chain, offering flexibility and scalability.
+## Attribution and license
 
-Inspired by [Uniswap merkle distributor](https://github.com/Uniswap/merkle-distributor)
+The on-chain program under `programs/` is a **minimal, intentional diff** on
+top of the upstream EQ Lab project:
 
-## Development Guide
+- the program ID (`declare_id!` / `Anchor.toml`), and
+- the `security_txt!` metadata block (POD Miner contacts and this repository).
 
-### Requirements
+No instruction logic, account layout, or error code was changed. The upstream
+project is licensed under the
+[GNU General Public License v3](LICENSE); this fork remains under GPL-3.0, the
+`LICENSE` file is unmodified, and upstream copyright and history are preserved
+in the git history of this repository. Everything in this repository —
+program and off-chain code alike — is GPL-3.0.
 
-1. [Anchor](https://www.anchor-lang.com/docs/installation)
-2. [Yarn](https://yarnpkg.com/getting-started/install)
+## What lives here
 
-### Install Dependencies
+| Path | What it is |
+| --- | --- |
+| `programs/rewards-distributor` | The Anchor program (upstream fork, diff above) |
+| `packages/distributor` | The daily job: ingest → Merkle tree → atomic fund+publish → reconcile |
+| `packages/api` | Read-only REST API (rewards, proofs, history, status) |
+| `packages/claim-sdk` | TypeScript SDK for building/sending claim transactions |
+| `packages/merkle` | Merkle tree construction (double-SHA256 leaves, sorted pairs) |
+| `packages/cli`, `packages/programs-wrappers` | Operator CLI + program bindings |
+| `migrations/` | Postgres ledger schema |
+| `ops/` | Docker stack: db + migrate + api + scheduler (cron `distributor run`) |
+| `tests/` | On-chain program tests |
 
-To install the required dependencies, run:
+## How it works
+
+1. A producer drops `INBOX_DIR/<YYYY-MM-DD>.json` (one round per UTC day:
+   `{version, round, total, count, rewards}`) into the inbox, atomically.
+2. The scheduler runs the job every 15 minutes. It validates the file
+   (all-or-nothing), ingests it into the Postgres ledger, and folds the day's
+   amounts into **lifetime totals** (totals never decrease).
+3. The job builds a Merkle tree over all totals, then publishes **one atomic
+   transaction**: `TransferChecked(round total)` operator → vault, plus
+   `update_root(new_root)`.
+4. Users fetch their total + proof from the API and claim with the SDK. The
+   program transfers `total − already_claimed` from the vault to the user's
+   USDC account.
+5. After each run the job reconciles: `vault balance + Σ claimed ≥ Σ funded
+   round totals`, and no claim record may exceed its wallet's total.
+
+Round file format, invariants, alerts, and every unspecified detail of the
+build are recorded in [DECISIONS.md](DECISIONS.md). Operating procedures —
+deploy, initialize, launch, daily operation — are in [RUNBOOK.md](RUNBOOK.md).
+
+## Development
+
+Requirements: Rust 1.79.0 (via `rust-toolchain.toml`), Solana CLI 1.18.26,
+Anchor CLI 0.30.1 (avm), Node 20, Yarn 1.22.22, Postgres 15 (Docker).
+
+The IDL build needs a pinned nightly (see DECISIONS.md — `anchor-lang-idl`
+honors `RUSTUP_TOOLCHAIN`):
 
 ```bash
 yarn
+RUSTUP_TOOLCHAIN=nightly-2025-03-01 anchor build
+yarn workspaces run test
 ```
 
-### Build program
+CI (`.github/workflows/build.yml`) builds the program and runs the unit
+tests on every push with the same pinned toolchain.
 
-To build the distributor program, run:
+## Deployment
 
-```bash
-anchor build
-```
+Program ID (devnet rehearsal + mainnet):
+[`6S7aGNpCdT8ADoVXUwQXJqVg63GRx9uteHDAycngyQcK`](https://solscan.io/account/6S7aGNpCdT8ADoVXUwQXJqVg63GRx9uteHDAycngyQcK)
 
-### Run tests
+Deploy and launch procedures, with the devnet rehearsal transcript, are in
+[RUNBOOK.md](RUNBOOK.md). One operator key serves as upgrade authority,
+admin, updater, and job signer (see DECISIONS.md for the key-handling rules).
 
-To execute the test suites, run:
+---
 
-```bash
-anchor test
-```
-
-Test scenarios are located in the `tests/*.spec.ts` files
-
-## License
-
-This project is distributed under the GPL v3.0 license.
-
-## CLI
-
-To run localnet:
-
-```bash
-yarn localnet
-```
-
-### Initialize
-
-```bash
-yarn cli admin initialize \
-  --private-key-file <filename> \
-  --cluster <localnet, devnet, testnet or mainnet-beta> \
-  --updater <updater_address> \
-  --token-mint <token_mint_address>
-```
-
-Example:
-
-```bash
-yarn cli admin initialize \
-  --private-key-file ~/.config/solana/id.json \
-  --cluster 'localnet' \
-  --updater '88u6FPoAKo9L4V6PzfL1Brz5JGYAdCt2QvjbgTPXZReC' \
-  --token-mint '9567hvuTyD6YCm5y3g8P1xCgfg8vh12nETfcfkWWANsy'
-```
-
-### Set new admin
-
-```bash
-yarn cli admin set-admin \
-  --private-key-file <filename> \
-  --cluster <localnet, devnet, testnet or mainnet-beta> \
-  --new-admin <admin_address>
-```
-
-### Set new updater
-
-```bash
-yarn cli admin set-updater \
-  --private-key-file <filename> \
-  --cluster <localnet, devnet, testnet or mainnet-beta> \
-  --new-updater <updater_address>
-```
-
-### Update Merkle tree root
-
-```bash
-yarn cli admin update-root \
-  --private-key-file <filename> \
-  --cluster <localnet, devnet, testnet or mainnet-beta> \
-  --new-root-file <filename>
-```
-
-```bash
-yarn cli admin update-root \
-  --private-key-file ~/.config/solana/id.json \
-  --cluster localnet \
-  --new-root-file 'root.json'
-```
-
-### Shutdown
-
-```bash
-yarn cli admin shutdown \
-  --private-key-file <filename> \
-  --cluster <localnet, devnet, testnet or mainnet-beta> \
-  --token-mint <token_mint_address>
-```
-
-```bash
-yarn cli admin shutdown \
-  --private-key-file ~/.config/solana/id.json \
-  --cluster localnet \
-  --token-mint '9567hvuTyD6YCm5y3g8P1xCgfg8vh12nETfcfkWWANsy'
-```
-
-### Claim
-
-```bash
-yarn cli user claim \
-  --private-key-file <filename> \
-  --cluster <localnet, devnet, testnet or mainnet-beta> \
-  --total-amount <amount> \
-  --proof-file <filename>
-```
-
-## Read states
-
-### Config
-
-```bash
-yarn cli read config \
-  --private-key-file <filename> \
-  --cluster <localnet, devnet, testnet or mainnet-beta>
-```
-
-### Claimed rewards
-
-```bash
-yarn cli read claimed-rewards \
-  --private-key-file <filename> \
-  --cluster <localnet, devnet, testnet or mainnet-beta> \
-  --claimant <claimant_address>
-```
+*Upstream README for the program itself, including its instruction set and
+development notes, is preserved in git history (`git show 5850585:README.md`).*

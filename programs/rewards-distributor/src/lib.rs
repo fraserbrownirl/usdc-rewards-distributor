@@ -9,15 +9,15 @@ mod instructions;
 mod state;
 
 security_txt! {
-    name: "Solana Rewards Distributor",
-    project_url: "https://enjoyoors.xyz/",
-    contacts: "support@enjoyoors.xyz",
-    policy: "https://github.com/eq-lab/solana-rewards-distributor",
+    name: "POD Miner Rewards Distributor",
+    project_url: "https://www.pod-miner.com",
+    contacts: "mailto:security@pod-miner.com",
+    policy: "https://www.pod-miner.com/security",
     preferred_languages: "en",
-    source_code: "https://github.com/eq-lab/solana-rewards-distributor"
+    source_code: "https://github.com/fraserbrownirl/usdc-rewards-distributor"
 }
 
-declare_id!("3UzMu6EhgnZMg95WpyDLA6JJPho2YEW7QF3sNcv4Zi8K");
+declare_id!("6S7aGNpCdT8ADoVXUwQXJqVg63GRx9uteHDAycngyQcK");
 
 #[program]
 pub mod rewards_distributor {

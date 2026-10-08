@@ -3,3 +3,9 @@
 node_modules
 target
 test-ledgerdist
+dist
+
+# rehearsal fixtures (devnet; keypairs + inbox state)
+scripts/rehearsal-claimants.json
+scripts/rehearsal-wallets.txt
+inbox/
