@@ -1,0 +1,27 @@
+{
+    "name": "@podminer/distributor",
+    "version": "1.0.0",
+    "private": true,
+    "description": "Daily distributor job: ingest round files, build trees, publish roots, reconcile",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "bin": {
+        "distributor": "dist/cli.js"
+    },
+    "scripts": {
+        "build": "tsc -p tsconfig.json",
+        "test": "vitest run"
+    },
+    "dependencies": {
+        "@podminer/merkle": "1.0.0",
+        "@solana/spl-token": "^0.4.9",
+        "@solana/web3.js": "^1.98.0",
+        "@coral-xyz/anchor": "^0.30.1",
+        "bs58": "^5.0.0",
+        "pg": "^8.11.5"
+    },
+    "devDependencies": {
+        "@types/pg": "^8.11.5",
+        "vitest": "^1.6.0"
+    }
+}
