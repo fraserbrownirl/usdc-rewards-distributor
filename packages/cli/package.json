@@ -4,7 +4,8 @@
     "description": "CLI for Solana reward distributor program",
     "private": true,
     "scripts": {
-        "start": "ts-node src/index.ts"
+        "start": "ts-node src/index.ts",
+        "test": "echo \"no unit tests (legacy upstream CLI)\""
     },
     "dependencies": {
         "@coral-xyz/anchor": "^0.30.1",

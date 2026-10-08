@@ -1,18 +1,21 @@
 {
-  "name": "programs-wrappers",
-  "version": "1.0.0",
-  "description": "Shared code for Solana programs",
-  "private": true,
-  "dependencies": {
-    "@coral-xyz/anchor": "^0.30.1",
-    "@solana/spl-token": "^0.4.9",
-    "@solana/web3.js": "^1.95.4",
-    "@marinade.finance/spl-governance": "^0.3.25"
-  },
-  "devDependencies": {
-    "@types/bn.js": "^5.1.6",
-    "@types/node": "^22.9.1",
-    "tsx": "^4.19.2",
-    "typescript": "^4.9.5"
-  }
+    "name": "programs-wrappers",
+    "version": "1.0.0",
+    "description": "Shared code for Solana programs",
+    "private": true,
+    "dependencies": {
+        "@coral-xyz/anchor": "^0.30.1",
+        "@solana/spl-token": "^0.4.9",
+        "@solana/web3.js": "^1.95.4",
+        "@marinade.finance/spl-governance": "^0.3.25"
+    },
+    "devDependencies": {
+        "@types/bn.js": "^5.1.6",
+        "@types/node": "^22.9.1",
+        "tsx": "^4.19.2",
+        "typescript": "^4.9.5"
+    },
+    "scripts": {
+        "test": "echo \"no unit tests (legacy upstream shared code)\""
+    }
 }

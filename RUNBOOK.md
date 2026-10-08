@@ -157,6 +157,29 @@ on day 3 only). Day 9 (2026-10-02) is the missing-funding day; day 13
   round left `ingested`, days 2–8 untouched. Pause semantics verified.
 - 10:55 UTC — operator re-funded: minted 3,000 USDC, sig
   `3wcgBtQFrTLKeQqLu4RaE184emekeQCLVU53RdjhvdLa89rTWpsWD59gxVvc8R7izYbsBMqhTn2XKrAsjetrVhkL`.
+- 11:04 UTC — scheduler tick 2 published the 8-round backlog (one atomic
+  fund+update_root tx per round, in order):
+  - 2026-09-24 (3 wallets, 6) root c6231a241aac… sig
+    `mtRgnw3eK9mbE5eZbb8LNm3b2PrkSe6goNk1qjg7Uk5mHoHu59WCfkEHaDTWj4XeAqZQd8B2qfNQQZjErY4Nu1d`
+  - 2026-09-25 (3 wallets, 12) root 8af172347599… sig
+    `2Rq6fjgUDu5tdMukx7N7XBYu32AG8cmWqxT8SACqYjNQkf1TeAk9kDCwCV8x2KFGxLJPihpMC5JshsPRMSSwL897`
+  - 2026-09-26 (54 wallets, 1446) root d6a7819b1990… sig
+    `3WNML3QGdsVH6zwFpYfUCaMJKs52qRZxr56DdW5LKEEMBgtGQcjSSmgyac2vPVLsxXZshTdJQa3MLoGPFFgrtBtk`
+  - 2026-09-27 (3 wallets, 24) root a52eb799ea8a… sig
+    `4914fbPZy8iZWH4jDCdy2zymuqJCApnaSkqcTD3c9QQzwWqi1brxxNYmjViNh9TYKMbqAX1PTMjCnZPyhMJvfRSX`
+  - 2026-09-28 (3 wallets, 30) root 3b114b05a628… sig
+    `56XLzN56TyprNzxGxSqz9mJQ1xkb3nsYufBpdSNufEiG77dtrbSE5MsvgvNkTanMTqZf9KJ9CECjCuJwcXF6rdKm`
+  - 2026-09-29 (3 wallets, 36) root a677c2b9b671… sig
+    `5zPv2ciWgQT6PxgwbUY4oyWZqEdzdUzYMtvi4xhzhgQjbM5AkveUTnvqGy4rZqYVWS731RGf6h7c4DeniN1tsQmP`
+  - 2026-09-30 (3 wallets, 42) root 1c0ea475a329… sig
+    `3uasDuvYgTDcSpC6G5K55suKow6jwobkH5gedqWcW2YhWXhd77iWPyGYLZDVMA46hLUkPQEFAuX23r1nX2PJ8ihG`
+  - 2026-10-01 (3 wallets, 48) root aa5158e9df8d… sig
+    `4DSQ31bwA3ovpqEWen29qnjXPugvCJYnLRSycZzVY6Gs23X5Loa2BFgG2oE3sgiWNuNhf5T4TRi6pAcX2D8E2xQx`
+  - `reconcile: ok (vault=1644 claimed=0 funded=1644 records=0)`
+- 11:08 UTC — daily claimer (claimants[0] E3NdU5Vf…) claimed 36 raw (6/day
+  × 6 published days), cumulative-total proof verified on-chain, sig
+  `gYMHyotHceeG7it59dXt7V2F9hBqV9AU9ZmUp4UjGvrioiNh7FXUGZc2cnZHVsV9QHS8isR69WSWFoRFgqAZpvZ`
+  (retried=false).
 <!-- TRANSCRIPT-END -->
 
 ## 7. Mainnet deployment record
