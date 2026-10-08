@@ -1,0 +1,16 @@
+{
+    "name": "@podminer/merkle",
+    "version": "1.0.0",
+    "private": true,
+    "description": "Merkle tree builder matching the rewards-distributor on-chain verifier byte-for-byte",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "scripts": {
+        "build": "tsc -p tsconfig.json",
+        "test": "vitest run"
+    },
+    "devDependencies": {
+        "@solana/web3.js": "^1.98.0",
+        "vitest": "^1.6.0"
+    }
+}

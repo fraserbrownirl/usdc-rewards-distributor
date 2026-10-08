@@ -1,0 +1,73 @@
+version: "3.9"
+
+# POD Miner USDC Rewards Distributor v1 — ops stack.
+#
+# Services:
+#   db          Postgres 15 (ledger)
+#   migrate     one-shot: apply migrations
+#   api         read-only REST API
+#   scheduler   cron loop: `distributor run` every 15 min + deadline checks
+#
+# Env (see .env.example / DECISIONS.md):
+#   DATABASE_URL, CLUSTER, RPC_URL, PROGRAM_ID, USDC_MINT,
+#   OPERATOR_KEYPAIR_PATH (mounted, 0600), INBOX_DIR (mounted),
+#   PRIORITY_FEE_MICROLAMPORTS, MIN_OPERATOR_SOL_LAMPORTS,
+#   ALERT_WEBHOOK_URL, API_PORT, CORS_ORIGINS, RATE_LIMIT_PER_MIN
+
+services:
+  db:
+    image: postgres:15
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: distributor
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD required}
+      POSTGRES_DB: distributor
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U distributor"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["node", "packages/distributor/dist/cli.js", "migrate"]
+    env_file: .env
+
+  api:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: ["node", "packages/api/dist/server.js"]
+    env_file: .env
+    ports:
+      - "127.0.0.1:${API_PORT:-8080}:8080"
+
+  scheduler:
+    build:
+      context: ..
+      dockerfile: ops/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command: ["node", "packages/distributor/dist/scheduler.js"]
+    env_file: .env
+    volumes:
+      - ${INBOX_DIR:?INBOX_DIR required}:/inbox:rw
+      - ${OPERATOR_KEYPAIR_PATH:?OPERATOR_KEYPAIR_PATH required}:/keys/operator.json:ro
+
+volumes:
+  pgdata:
