@@ -180,6 +180,48 @@ on day 3 only). Day 9 (2026-10-02) is the missing-funding day; day 13
   × 6 published days), cumulative-total proof verified on-chain, sig
   `gYMHyotHceeG7it59dXt7V2F9hBqV9AU9ZmUp4UjGvrioiNh7FXUGZc2cnZHVsV9QHS8isR69WSWFoRFgqAZpvZ`
   (retried=false).
+- 11:04 UTC — deadline alerter fired `file_missing` for 2026-10-07 (held
+  back deliberately; warning deduped against `.alert-state.json`).
+- 11:19 UTC — day 9 (2026-10-02, missing-funding day) released with operator
+  drained to 53 raw: ingested, tree root dd23608f7d10…, then
+  `funding_missing` (operator USDC 53 < round total 54) — round left
+  `ingested`, exit 0. Operator re-funded to 107 (mint 54 raw, sig
+  `2nj3NyUQFvGsHdMa85GHomaKn9tyEH319edeKG6M5cZM7uxzan7fhnKWvP4qqi3AAYA2Sav31T9dQKiET7bsSS8Z`).
+- 11:34 UTC — next tick published 2026-10-02, sig
+  `32Tjqhi4Z374iLyHNMczyYphfK3mW23tpL7pfib1WgK7hnLAV32GRDuFENh91KjxMjx2o4U8mJhBoehncaM5z9ir`.
+  `reconcile: ok (vault=1662 claimed=36 funded=1698 records=1)`.
+- 11:35 UTC — daily claimer claimed 9 raw (total 45), sig
+  `2A9Mg5kZivXsmieELNTkAbEWycTY8sKAwc9SzcPJZX1vNVFkisC4ACTwg1EKbGJ6FqwogahqGeUiK73uQ3bkrrj7`.
+- 11:36 UTC — operator topped up to 353 raw (mint 300, sig
+  `3e3noPn7hoSnietK69MAnYNDNq3uoQMWh6GLkm49UFg7AtHbGWrQpfJeRZ92wpnmMWbcTKTJARjXLMEW7LUvuzJQ`)
+  and days 10–14 released from hold.
+- 11:49 UTC — single tick swept the remaining five rounds:
+  - 2026-10-03 (3 wallets, 60) root 160369241f6b… sig
+    `2RWWCY7ioXqzzuaopKssneP5NNB2UhfBvbEjvRb3LicriRs4wCZntcBtZvCLrALe1RFAkQTMMHgwkAg4kthNLP2o`
+  - 2026-10-04 (3 wallets, 66) root 8310479d578e… sig
+    `vQRHbhYjWXqxAFh333y7zxEw7ZQiK5mDDJUyE4xQmXMTPQfGKFJBwTKUajJoeUXLWUNqYfipARCWi4a6JMVJJXj`
+  - 2026-10-05 (3 wallets, 72) root b545568004a2… sig
+    `4BK8EaWwTMdbpoTTTqa7KJHaWv2Xa4rv7fTzxVEHAtZZ3BxEcm73tcUUbjdDLirYs6sCNydk9P4SjqFW8aBt8e3V`
+  - 2026-10-06 — **empty day**: `ingest: empty 2026-10-06`, marked `empty`,
+    no publish tx (root unchanged). Empty-day semantics verified.
+  - 2026-10-07 (3 wallets, 84) root 3602200a7cac… sig
+    `4mCGhxQJSUKfaKwYhjzsxrDmArZ4K7ze9e76BNceE2G9QgiqUDWZtgKZyBi6K9x82vBJyJyBDagBJrUmMP1JYp1C`
+  - `reconcile: ok (vault=1935 claimed=45 funded=1980 records=1)`
+- 11:50 UTC — end claimer (claimants[1] 2hoqNVYk…) claimed 210 raw
+  (2×(1+…+8,10,…,14) minus day-9/13), sig
+  `BrtST4xqJx4N2BdnEMTzszmVG9ASrpbxDX2w63tKWMQMh6kixKv8miNS7tCek3ENvLfFvMn7LaJWtNcnmGooiwY`.
+- 11:50 UTC — no-ATA wallet (claimants[2] HmFXSazQ…) claimed 276 raw; the
+  claim transaction created its USDC ATA idempotently (verified: account
+  exists post-claim, balance 0.000276), sig
+  `4oeN6y1DuUs8fWUz6YTceJTR3maU6D8xWRswXC2nfp2BKzHr82cPGWpLa9wEmoM1nM3QEDvsWS5gj4pswG5RzEm`.
+- 11:50 UTC — unknown wallet (all-ones) via API: total 0, claimed 0,
+  claimable 0, empty proof, current root. `/v1/status`: round 2026-10-07,
+  wallet_count 54, shutdown false.
+- 11:51 UTC — final standalone reconcile: `{"ok":true,"vaultBalance":"1475",
+  "claimedSum":"505","fundedTotal":"1980","claimRecords":3,
+  "vaultUnstable":false,"overclaims":[]}`. Rehearsal complete: 14 rounds
+  (13 published + 1 empty), 54 wallets, funding_missing ×2 verified,
+  empty day verified, daily + end + no-ATA claimers verified, clean reconcile.
 <!-- TRANSCRIPT-END -->
 
 ## 7. Mainnet deployment record
