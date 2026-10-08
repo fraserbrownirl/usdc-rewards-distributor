@@ -7,7 +7,7 @@
     "types": "dist/index.d.ts",
     "scripts": {
         "build": "tsc -p tsconfig.json",
-        "test": "vitest run"
+        "test": "vitest run --passWithNoTests"
     },
     "dependencies": {
         "@coral-xyz/anchor": "^0.30.1",

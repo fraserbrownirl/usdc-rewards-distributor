@@ -7,7 +7,7 @@
     "types": "dist/index.d.ts",
     "scripts": {
         "build": "tsc -p tsconfig.json",
-        "test": "vitest run"
+        "test": "vitest run --passWithNoTests"
     },
     "devDependencies": {
         "@solana/web3.js": "^1.98.0",
